@@ -2,183 +2,31 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"github.com/sagernet/sing-box"
-	"github.com/sagernet/sing-box/option"
-	"net/netip"
+	"go.mamad.dev/local-vpn/app"
+	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	runtimeDebug "runtime/debug"
 )
 
-var (
-	UUID       string
-	IPs        string
-	Port       uint16
-	PKey       string
-	ShortId    string
-	FP         string
-	ServerName string
-	Flow       string
-)
-
 func run() (*box.Box, context.CancelFunc, error) {
-	uuid := UUID
-
-	tun := option.Listable[option.ListenPrefix]{}
-	err := tun.UnmarshalJSON([]byte(`"172.19.0.1/30"`))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var outbounds []option.Outbound
-	IPS := make(map[string]string)
-	list := strings.Split(IPs, ";")
-	for _, v := range list {
-		vv := strings.Split(v, ":")
-		if len(vv) != 2 {
-			continue
-		}
-		IPS[vv[0]] = vv[1]
-	}
-	for tag, addr := range IPS {
-		outbounds = append(outbounds, option.Outbound{
-			Type: "vless",
-			Tag:  fmt.Sprintf("proxy-%s", tag),
-			VLESSOptions: option.VLESSOutboundOptions{
-				ServerOptions: option.ServerOptions{
-					Server:     addr,
-					ServerPort: Port,
-				},
-				UUID:    uuid,
-				Flow:    Flow,
-				Network: "tcp",
-				TLS: &option.OutboundTLSOptions{
-					Enabled:    true,
-					ServerName: ServerName,
-					Insecure:   true,
-					ALPN:       nil,
-					UTLS: &option.OutboundUTLSOptions{
-						Enabled:     true,
-						Fingerprint: FP,
-					},
-					Reality: &option.OutboundRealityOptions{
-						Enabled:   true,
-						PublicKey: PKey,
-						ShortID:   ShortId,
-					},
-				},
-			},
-		})
-	}
-
-	outbounds = append(outbounds, option.Outbound{
-		Type:          "direct",
-		Tag:           "direct",
-		DirectOptions: option.DirectOutboundOptions{},
-	})
-
-	outbounds = append(outbounds, option.Outbound{
-		Type: "block",
-		Tag:  "block",
-	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	options := app.GetOptions()
+
+	if options == nil {
+		cancel()
+		return nil, nil, errors.New("options is nil")
+	}
+
 	instance, err := box.New(box.Options{
 		Context: ctx,
-		Options: option.Options{
-			Log: &option.LogOptions{
-				Disabled:     false,
-				Level:        "info",
-				Timestamp:    true,
-				DisableColor: false,
-			},
-			Inbounds: []option.Inbound{
-				{
-					Type: "mixed",
-					Tag:  "mixed-in",
-					MixedOptions: option.HTTPMixedInboundOptions{
-						ListenOptions: option.ListenOptions{
-							Listen: option.NewListenAddress(netip.MustParseAddr(
-								"0.0.0.0")),
-							ListenPort:  9595,
-							TCPFastOpen: true,
-							InboundOptions: option.InboundOptions{
-								SniffEnabled:             true,
-								SniffOverrideDestination: true,
-								SniffTimeout:             1,
-								DomainStrategy:           0,
-							},
-						},
-						SetSystemProxy: false,
-					},
-				},
-				{
-					Type: "tun",
-					Tag:  "tun-in",
-					TunOptions: option.TunInboundOptions{
-						InterfaceName:          "filter_lol_tun0",
-						Inet4Address:           tun,
-						MTU:                    9000,
-						AutoRoute:              true,
-						StrictRoute:            true,
-						EndpointIndependentNat: false,
-					},
-				},
-			},
-			Outbounds: outbounds,
-			Route: &option.RouteOptions{
-				Rules: []option.Rule{
-					{
-						DefaultOptions: option.DefaultRule{
-							Inbound: []string{
-								"mixed-in",
-								"tun-in",
-							},
-							Protocol: []string{
-								"tls",
-								"http",
-								"quic",
-							},
-							DomainRegex: []string{"^.ir$"},
-							GeoIP:       []string{"ir", "private"},
-							IPCIDR: []string{
-								"0.0.0.0/8",
-								"10.0.0.0/8",
-								"fc00::/7",
-								"fe80::/10",
-							},
-							ClashMode: "direct",
-							Outbound:  "direct",
-							Invert:    false,
-						},
-					},
-					{
-						DefaultOptions: option.DefaultRule{
-							Inbound: []string{
-								"mixed-in",
-								"tun-in",
-							},
-							Protocol: []string{
-								"tls",
-								"http",
-								"quic",
-							},
-							DomainRegex: []string{},
-							Geosite:     []string{"category-ads-all"},
-							IPCIDR:      []string{},
-							ClashMode:   "block",
-							Outbound:    "block",
-							Invert:      false,
-						},
-					},
-				},
-				AutoDetectInterface: true,
-			},
-		},
+		Options: *options,
 	})
 
 	if err != nil {
@@ -221,7 +69,11 @@ func main() {
 		for {
 			osSignal := <-osSignals
 			cancel()
-			instance.Close()
+			err := instance.Close()
+			if err != nil {
+				log.Println("Error::", err.Error())
+				return
+			}
 			if osSignal != syscall.SIGHUP {
 				return
 			}
